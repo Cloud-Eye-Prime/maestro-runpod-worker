@@ -91,9 +91,25 @@ def _build_objects(scene_dict):
     bpy.context.scene.world = world
 
 
+def _engine_id(engine):
+    """Map the contract's engine word to Blender's own identifier.
+
+    "CYCLES" is "CYCLES". "EEVEE" is "BLENDER_EEVEE_NEXT" on Blender 4.2+
+    and "BLENDER_EEVEE" on older builds; the bare word "EEVEE" is not a
+    valid enum value and would raise TypeError at assignment.
+    """
+    if engine == "CYCLES":
+        return "CYCLES"
+    items = bpy.types.RenderSettings.bl_rna.properties["engine"].enum_items
+    names = set(item.identifier for item in items)
+    if "BLENDER_EEVEE_NEXT" in names:
+        return "BLENDER_EEVEE_NEXT"
+    return "BLENDER_EEVEE"
+
+
 def _configure_render(job):
     scene = bpy.context.scene
-    scene.render.engine = job["engine"]
+    scene.render.engine = _engine_id(job["engine"])
     scene.render.resolution_x = job["width"]
     scene.render.resolution_y = job["height"]
     scene.render.resolution_percentage = 100
