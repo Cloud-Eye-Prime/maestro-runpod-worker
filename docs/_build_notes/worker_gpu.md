@@ -100,3 +100,34 @@ pre-push smoke check only, not a substitute.
   branch list (temporary, for this job's proof; main's own behaviour
   is unchanged) so CI builds and pushes :latest from this branch,
   watched with `gh run watch` in the foreground per the gate.
+- RESUMED (prior session hit its 1800s cap here). Confirmed CI run
+  34052955826 (push, worker-gpu) already completed: success, 2m56s,
+  :latest pushed. No PR existed yet (gh pr list --head worker-gpu:
+  empty).
+- ENDPOINT ROLL: called runpod-mcp update-endpoint(endpointId=
+  e9dn9lnn5g4j9c, imageName=same value) to try to force a new release;
+  it returned 200 but list-endpoint-releases showed endpointVersion
+  still 1, no new release recorded (RunPod treats an unchanged image
+  string as no diff -- this call did NOT roll anything, noted so it is
+  not mistaken for the actual mechanism). The one running worker
+  (5doio4jyqhap34) had started at 18:57:23Z, after CI's push finished
+  (~18:52:44Z), so it had already cold-pulled the new :latest on its
+  own before I touched the endpoint. Verified this directly rather
+  than trusting timestamps: ran the seat's own EEVEE probe and checked
+  for the new "device_reason" field (only exists in the new code).
+- PROBE (EEVEE, same payload as commit 2's diagnosis, via runsync):
+  ok=true, blender=4.2.23, device=CPU, device_reason="engine is EEVEE,
+  not CYCLES; Cycles CUDA/OPTIX device selection does not apply, and
+  the handler contract has no GPU value for non-Cycles engines",
+  seconds=38.796 (cold container init included; not a regression, the
+  fix does not touch EEVEE's path). Confirms the new image is live and
+  the fix behaves exactly as designed for the seat's liveness check.
+- RENDER (CYCLES, 2 frames, 64 samples, 512x512, return=base64, via
+  runsync): ok=true, blender=4.2.23, device=OPTIX, device_reason=
+  "prefs.get_devices() found 1 OPTIX device(s)", frames_rendered=2,
+  seconds=6.035. GPU selected, well under the $0.10 render budget and
+  far below the CPU baseline. select_cycles_device() proven correct
+  live, not just offline.
+- No STOP-AND-ASK triggers hit: no CUDA/driver mismatch, CI pushed
+  fine, and the endpoint rolled the image on its own (no worker
+  deletion needed).
