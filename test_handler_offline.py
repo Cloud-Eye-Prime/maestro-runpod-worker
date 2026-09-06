@@ -15,7 +15,8 @@ class _FakeResp:
         self.status_code = status_code
 
 
-def _stub_blender(n_frames=1, device="OPTIX", version="4.2.23", returncode=0, stderr=""):
+def _stub_blender(n_frames=1, device="OPTIX", version="4.2.23", returncode=0, stderr="",
+                   device_reason="prefs.get_devices() found 1 OPTIX device(s)"):
     def _run(cmd, capture_output, text, timeout):
         job_args_path = cmd[-2]
         out_dir = cmd[-1]
@@ -26,7 +27,8 @@ def _stub_blender(n_frames=1, device="OPTIX", version="4.2.23", returncode=0, st
                 path = os.path.join(out_dir, "frame_%04d.png" % i)
                 with open(path, "wb") as pf:
                     pf.write(b"\x89PNG\r\n\x1a\nfakepngdata")
-        stdout = "[maestro] blender_version=%s\n[maestro] device=%s\n" % (version, device)
+        stdout = "[maestro] blender_version=%s\n[maestro] device=%s\n[maestro] device_reason=%s\n" % (
+            version, device, device_reason)
         return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
     return _run
 
@@ -39,6 +41,7 @@ def test_default_input_renders_test_scene(monkeypatch):
     assert out["ok"] is True
     assert out["frames_rendered"] == 1
     assert out["device"] == "OPTIX"
+    assert "OPTIX" in out["device_reason"]
     assert out["blender"] == "4.2.23"
     assert len(out["artifacts"]) == 1
     assert "b64" in out["artifacts"][0]
@@ -171,6 +174,79 @@ def test_unknown_device_falls_back_to_cpu(monkeypatch):
     out = handler.handler({"input": {}})
     assert out["ok"] is True
     assert out["device"] == "CPU"
+
+
+def test_eevee_reports_cpu_with_reason(monkeypatch):
+    monkeypatch.setattr(handler, "_run_blender", lambda p, o: _stub_blender(
+        n_frames=1, device="CPU",
+        device_reason="engine is EEVEE, not CYCLES; Cycles CUDA/OPTIX device selection does not apply")(
+        [handler.BLENDER_BIN, "-b", "--python", handler.SCENE_BUILDER, "--", p, o],
+        True, True, handler.RENDER_TIMEOUT_SEC))
+    out = handler.handler({"input": {"engine": "EEVEE"}})
+    assert out["ok"] is True
+    assert out["device"] == "CPU"
+    assert "EEVEE" in out["device_reason"]
+
+
+def test_cycles_cpu_fallback_reports_reason(monkeypatch):
+    monkeypatch.setattr(handler, "_run_blender", lambda p, o: _stub_blender(
+        n_frames=1, device="CPU",
+        device_reason="no GPU device available for OPTIX or CUDA (OPTIX: 0 devices in prefs.devices; CUDA: 0 devices in prefs.devices)")(
+        [handler.BLENDER_BIN, "-b", "--python", handler.SCENE_BUILDER, "--", p, o],
+        True, True, handler.RENDER_TIMEOUT_SEC))
+    out = handler.handler({"input": {"engine": "CYCLES"}})
+    assert out["ok"] is True
+    assert out["device"] == "CPU"
+    assert "OPTIX" in out["device_reason"] and "CUDA" in out["device_reason"]
+
+
+def test_missing_device_reason_line_has_fallback_message(monkeypatch):
+    def _run(p, o):
+        with open(p) as f:
+            json.load(f)
+        path = os.path.join(o, "frame_0001.png")
+        with open(path, "wb") as pf:
+            pf.write(b"\x89PNG\r\n\x1a\nfakepngdata")
+        stdout = "[maestro] blender_version=4.2.23\n[maestro] device=OPTIX\n"
+        return subprocess.CompletedProcess(
+            [handler.BLENDER_BIN, "-b", "--python", handler.SCENE_BUILDER, "--", p, o],
+            0, stdout=stdout, stderr="")
+    monkeypatch.setattr(handler, "_run_blender", _run)
+    out = handler.handler({"input": {}})
+    assert out["ok"] is True
+    assert out["device_reason"] == "no device_reason reported by scene_builder.py"
+
+
+def test_diag_mode_bypasses_render(monkeypatch):
+    monkeypatch.setattr(
+        handler.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, stdout="diag output", stderr=""))
+
+    def _fake_diag_blender(out_path):
+        with open(out_path, "w") as f:
+            json.dump({"blender_version": "4.2.23", "devices": {"OPTIX": [{"name": "A5000", "type": "OPTIX", "use": True}]}}, f)
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+    monkeypatch.setattr(handler, "_run_diag_blender", _fake_diag_blender)
+
+    out = handler.handler({"input": {"diag": True}})
+    assert out["ok"] is True
+    assert "diag" in out
+    assert out["diag"]["blender_devices"]["devices"]["OPTIX"][0]["type"] == "OPTIX"
+    assert out["diag"]["nvidia_smi"] == "diag output"
+
+
+def test_diag_mode_survives_missing_output_file(monkeypatch):
+    monkeypatch.setattr(
+        handler.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, stdout="", stderr=""))
+    monkeypatch.setattr(
+        handler, "_run_diag_blender",
+        lambda out_path: subprocess.CompletedProcess([], 1, stdout="", stderr="blender crashed"))
+
+    out = handler.handler({"input": {"diag": True}})
+    assert out["ok"] is True
+    assert out["diag"]["blender_devices"] is None
+    assert "crashed" in out["diag"]["blender_stderr_tail"]
 
 
 def test_never_crashes_on_garbage_input():

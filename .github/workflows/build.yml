@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install pytest requests runpod
-      - run: pytest test_handler_offline.py -v
+      - run: pytest test_handler_offline.py test_scene_builder_offline.py -v
 
   build:
     needs: test

@@ -5,9 +5,27 @@ Contract:
            "engine": "CYCLES"|"EEVEE", "samples": int,
            "return": "base64"|"url", "upload_url": optional str}
   output: {"ok": true, "frames_rendered": int, "seconds": float,
-           "device": "CUDA"|"OPTIX"|"CPU", "artifacts": [...],
-           "blender": "<version string>"}
+           "device": "CUDA"|"OPTIX"|"CPU", "device_reason": "<string>",
+           "artifacts": [...], "blender": "<version string>"}
   error:  {"ok": false, "error": "<string>"}
+
+  device_reason is additive (not in the original fixed contract): why
+  "device" reads what it does. CYCLES + a GPU found: which backend and
+  how many devices. CYCLES + none found: which backends were tried and
+  why each failed. Any non-CYCLES engine: "device" is always "CPU"
+  because Cycles device selection does not apply and the contract has
+  no GPU value for other engines -- device_reason says so, so a caller
+  never mistakes that CPU for "no GPU was available".
+
+  diag mode (not a render): input {"diag": true} skips validate_input
+  entirely and returns {"ok": true, "diag": {"nvidia_smi": str,
+  "cuda_libs": [str], "blender_devices": {<backend>: [...]} | null,
+  "blender_stderr_tail": str}} -- nvidia-smi output, the CUDA/nvidia
+  driver libs visible in the container, and Blender's own
+  prefs.devices for OPTIX/CUDA/NONE. No scene, no render, near-zero
+  cost: the fast way to tell "no libcuda in the container" apart from
+  "Cycles found no device" apart from "the driver refused this
+  Blender build's kernels".
 """
 import base64
 import glob
@@ -39,6 +57,9 @@ VALID_DEVICES = ("CUDA", "OPTIX", "CPU")
 
 _VERSION_RE = re.compile(r"\[maestro\] blender_version=(\S+)")
 _DEVICE_RE = re.compile(r"\[maestro\] device=(\S+)")
+_DEVICE_REASON_RE = re.compile(r"\[maestro\] device_reason=(.*)")
+
+DIAG_TIMEOUT_SEC = 60
 
 
 def _as_int(value, default):
@@ -122,10 +143,64 @@ def _run_blender(job_args_path, out_dir):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=RENDER_TIMEOUT_SEC)
 
 
+def _run_diag_blender(out_path):
+    cmd = [BLENDER_BIN, "-b", "--python", SCENE_BUILDER, "--", "--diag", out_path]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=DIAG_TIMEOUT_SEC)
+
+
+def run_diag():
+    """No render, no scene, near-zero cost: nvidia-smi, the CUDA driver
+    libs visible to the container, and Blender's own prefs.devices for
+    each compute_device_type -- the fast path to tell "no libcuda in the
+    container" apart from "Cycles found no device" apart from "the
+    driver refused this Blender build's kernels"."""
+    try:
+        proc = subprocess.run(["nvidia-smi"], capture_output=True, text=True, timeout=30)
+        nvidia_smi = ((proc.stdout or "") + (proc.stderr or ""))[-4000:]
+    except Exception as e:
+        nvidia_smi = "nvidia-smi failed: %s: %s" % (type(e).__name__, str(e))
+
+    try:
+        proc = subprocess.run(
+            "ls /usr/lib/x86_64-linux-gnu | grep -i -E 'cuda|nvidia'",
+            shell=True, capture_output=True, text=True, timeout=30,
+        )
+        cuda_libs = [line for line in (proc.stdout or "").splitlines() if line]
+    except Exception as e:
+        cuda_libs = ["error: %s: %s" % (type(e).__name__, str(e))]
+
+    with tempfile.TemporaryDirectory() as work_dir:
+        out_path = os.path.join(work_dir, "diag.json")
+        blender_devices = None
+        blender_stderr_tail = ""
+        try:
+            result = _run_diag_blender(out_path)
+            blender_stderr_tail = (result.stderr or "")[-2000:]
+        except subprocess.TimeoutExpired:
+            blender_stderr_tail = "blender diag call timed out"
+        if os.path.exists(out_path):
+            with open(out_path) as f:
+                blender_devices = json.load(f)
+
+    return {
+        "ok": True,
+        "diag": {
+            "nvidia_smi": nvidia_smi,
+            "cuda_libs": cuda_libs,
+            "blender_devices": blender_devices,
+            "blender_stderr_tail": blender_stderr_tail,
+        },
+    }
+
+
 def handler(job):
     start = time.time()
     try:
-        clean, err = validate_input(job.get("input") or {})
+        input_data = job.get("input") or {}
+        if input_data.get("diag") is True:
+            return run_diag()
+
+        clean, err = validate_input(input_data)
         if err:
             return {"ok": False, "error": err}
 
@@ -149,6 +224,7 @@ def handler(job):
             device = _extract(_DEVICE_RE, stdout, "CPU")
             if device not in VALID_DEVICES:
                 device = "CPU"
+            device_reason = _extract(_DEVICE_REASON_RE, stdout, "no device_reason reported by scene_builder.py")
             blender_version = _extract(_VERSION_RE, stdout, "unknown")
 
             frame_files = sorted(glob.glob(os.path.join(out_dir, "*.png")))
@@ -175,6 +251,7 @@ def handler(job):
                 "frames_rendered": len(artifacts),
                 "seconds": round(time.time() - start, 3),
                 "device": device,
+                "device_reason": device_reason,
                 "artifacts": artifacts,
                 "blender": blender_version,
             }
