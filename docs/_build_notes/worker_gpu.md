@@ -94,3 +94,9 @@ pre-push smoke check only, not a substitute.
   AppData\Local\Programs\Python\Python311 is broken, see top of file;
   CI's setup-python 3.11 is the real gate). ast.parse clean; ASCII
   only. CI workflow updated to run both test files.
+- [commit 3] build.yml's push trigger was `branches: [main]` only, so
+  pushing this branch would never build or push :latest -- and the
+  brief says do NOT merge to main. Added "worker-gpu" to the trigger's
+  branch list (temporary, for this job's proof; main's own behaviour
+  is unchanged) so CI builds and pushes :latest from this branch,
+  watched with `gh run watch` in the foreground per the gate.
