@@ -107,6 +107,35 @@ def _engine_id(engine):
     return "BLENDER_EEVEE"
 
 
+def select_cycles_device(prefs):
+    """Try OPTIX then CUDA on a Cycles addon preferences object (real
+    bpy.context.preferences.addons["cycles"].preferences, or a fake with
+    the same shape in tests). Returns (device, device_reason). Mutates
+    prefs: sets compute_device_type and flips .use on the winning
+    backend's devices, since that is Blender's own gate for which
+    devices Cycles will actually render on.
+
+    Does not touch prefs at all for a backend whose enum value the
+    running Blender build rejects (older/newer builds vary); that is
+    recorded in device_reason, not raised.
+    """
+    tried = []
+    for candidate in ("OPTIX", "CUDA"):
+        try:
+            prefs.compute_device_type = candidate
+        except TypeError:
+            tried.append("%s: not a valid compute_device_type on this Blender build" % candidate)
+            continue
+        prefs.get_devices()
+        matches = [d for d in prefs.devices if d.type == candidate]
+        if matches:
+            for d in matches:
+                d.use = True
+            return candidate, "prefs.get_devices() found %d %s device(s)" % (len(matches), candidate)
+        tried.append("%s: 0 devices in prefs.devices" % candidate)
+    return "CPU", "no GPU device available for OPTIX or CUDA (%s)" % "; ".join(tried)
+
+
 def _configure_render(job):
     scene = bpy.context.scene
     scene.render.engine = _engine_id(job["engine"])
@@ -118,37 +147,55 @@ def _configure_render(job):
     scene.render.image_settings.file_format = "PNG"
     scene.render.use_file_extension = False
 
-    device = "CPU"
     if job["engine"] == "CYCLES":
         scene.cycles.samples = job["samples"]
         prefs = bpy.context.preferences.addons["cycles"].preferences
-        for candidate in ("OPTIX", "CUDA"):
-            try:
-                prefs.compute_device_type = candidate
-            except TypeError:
-                continue
-            prefs.get_devices()
-            enabled = 0
-            for dev in prefs.devices:
-                if dev.type == candidate:
-                    dev.use = True
-                    enabled += 1
-            if enabled > 0:
-                device = candidate
-                break
+        device, device_reason = select_cycles_device(prefs)
         scene.cycles.device = "GPU" if device != "CPU" else "CPU"
     else:
         scene.eevee.taa_render_samples = job["samples"]
+        device = "CPU"
+        device_reason = ("engine is %s, not CYCLES; Cycles CUDA/OPTIX device "
+                          "selection does not apply, and the handler contract "
+                          "has no GPU value for non-Cycles engines" % job["engine"])
 
     print("[maestro] device=%s" % device)
+    print("[maestro] device_reason=%s" % device_reason)
     print("[maestro] blender_version=%s" % bpy.app.version_string)
+
+
+def diag_main(out_path):
+    """Enumerate Cycles' own view of the GPU, no render, no scene: for
+    each backend Blender's Cycles addon supports, what prefs.devices
+    reports once compute_device_type is set to it. Written to out_path
+    as JSON for handler.py's diag mode to read back."""
+    result = {"blender_version": bpy.app.version_string, "devices": {}}
+    prefs = bpy.context.preferences.addons["cycles"].preferences
+    for candidate in ("OPTIX", "CUDA", "NONE"):
+        try:
+            prefs.compute_device_type = candidate
+        except TypeError:
+            result["devices"][candidate] = "not a valid compute_device_type on this Blender build"
+            continue
+        prefs.get_devices()
+        result["devices"][candidate] = [
+            {"name": d.name, "type": d.type, "use": d.use} for d in prefs.devices
+        ]
+    with open(out_path, "w") as f:
+        json.dump(result, f)
 
 
 def main():
     argv = sys.argv
     sep = argv.index("--")
-    job_args_path = argv[sep + 1]
-    out_dir = argv[sep + 2]
+    args = argv[sep + 1:]
+
+    if args and args[0] == "--diag":
+        diag_main(args[1])
+        return
+
+    job_args_path = args[0]
+    out_dir = args[1]
     os.makedirs(out_dir, exist_ok=True)
 
     with open(job_args_path) as f:
