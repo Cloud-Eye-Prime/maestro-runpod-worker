@@ -17,6 +17,7 @@ handler.py then encodes each pass to an mp4 (crf 12, yuv420p) and returns those:
 import base64
 import math
 import os
+import re
 import subprocess
 import tempfile
 import zipfile
@@ -34,6 +35,14 @@ VIDEO_CRF = 12
 # bytes at 6 MB (8 MB encoded) and leave room for the JSON around them.
 MAX_RAW_BYTES = 6 * 1000 * 1000
 FFMPEG_BIN = "ffmpeg"
+# 1280x720 x 81 at 16 samples rendered in 457 s on 11-01 against a 600 s job timeout.
+# The guide defaults to 960x540 and 8 denoised samples (about 0.56x the pixels, half
+# the samples), and the render loop gives up early when it projects past the budget.
+GUIDE_DEFAULT_WIDTH = 960
+GUIDE_DEFAULT_HEIGHT = 540
+GUIDE_DEFAULT_SAMPLES = 8
+RENDER_BUDGET_S = 480.0
+BUDGET_PROBE_FRAMES = 3
 
 
 def is_guide(scene):
@@ -252,7 +261,8 @@ def encode_passes(out_dir, video_dir, passes, fps, run=subprocess.run, crf=VIDEO
         proc = run(ffmpeg_cmd(out_dir, name, fps, out_path, crf),
                    capture_output=True, text=True, timeout=600)
         if proc.returncode != 0 or not os.path.exists(out_path):
-            raise RuntimeError("ffmpeg failed for %s: %s" % (name, (proc.stderr or "")[-500:]))
+            raise RuntimeError("ffmpeg failed for %s: %s; %s" % (
+                name, (proc.stderr or "")[-500:], frames_listing(out_dir)))
         made.append((name, out_path))
     return made
 
@@ -274,3 +284,48 @@ def package_videos(made, zip_path, cap=MAX_RAW_BYTES):
         raise RuntimeError("guide videos are %d bytes (%d zipped), over the %d cap; "
                            "lower width/height or frames" % (total, zipped, cap))
     return [zip_path], "zip"
+
+
+_FRAME_RE = re.compile(r"^(frame|depth|canny|mask)_?(\d+)((?:\.png)*)$")
+
+
+def normalise_frames(out_dir, listdir=os.listdir, rename=os.rename):
+    """Rename every pass frame to <prefix>_NNNN.png whatever extension Blender gave it.
+
+    Blender's File Output node and write_still disagree about who adds ".png"
+    (scene.render.use_file_extension), so files can arrive as depth_0001,
+    depth_0001.png or frame_0001.png.png. Returns how many were renamed.
+    """
+    renamed = 0
+    for fname in listdir(out_dir):
+        m = _FRAME_RE.match(fname)
+        if not m:
+            continue
+        want = "%s_%04d.png" % (m.group(1), int(m.group(2)))
+        if want != fname:
+            rename(os.path.join(out_dir, fname), os.path.join(out_dir, want))
+            renamed += 1
+    return renamed
+
+
+def projected_seconds(elapsed, done, total):
+    """Seconds the whole render will take, from `done` frames in `elapsed` seconds."""
+    if done < 1:
+        return 0.0
+    return elapsed / float(done) * total
+
+
+def over_budget(elapsed, done, total, budget=RENDER_BUDGET_S):
+    """True when the projection says the render will miss the budget."""
+    return projected_seconds(elapsed, done, total) > budget
+
+
+def frames_listing(out_dir, listdir=os.listdir, limit=20):
+    """Names (only) of what is in out_dir, for an error message: first `limit`, sorted."""
+    try:
+        names = sorted(listdir(out_dir))
+    except OSError as exc:
+        return "frames dir unreadable (%s)" % type(exc).__name__
+    shown = ", ".join(names[:limit])
+    more = " (+%d more)" % (len(names) - limit) if len(names) > limit else ""
+    return "frames dir holds %d files: %s%s" % (len(names), shown or "none", more)

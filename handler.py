@@ -103,10 +103,10 @@ def validate_input(data):
     else:
         frames = max(1, min(frames, MAX_FRAMES))
 
-    width, err = _as_int(data.get("width"), DEFAULT_WIDTH)
+    width, err = _as_int(data.get("width"), guide_scene.GUIDE_DEFAULT_WIDTH if guide else DEFAULT_WIDTH)
     if err:
         return None, "width %s" % err
-    height, err = _as_int(data.get("height"), DEFAULT_HEIGHT)
+    height, err = _as_int(data.get("height"), guide_scene.GUIDE_DEFAULT_HEIGHT if guide else DEFAULT_HEIGHT)
     if err:
         return None, "height %s" % err
     if width < 1 or height < 1:
@@ -116,7 +116,7 @@ def validate_input(data):
         width = max(1, int(width * scale))
         height = max(1, int(height * scale))
 
-    samples, err = _as_int(data.get("samples"), DEFAULT_SAMPLES)
+    samples, err = _as_int(data.get("samples"), guide_scene.GUIDE_DEFAULT_SAMPLES if guide else DEFAULT_SAMPLES)
     if err:
         return None, "samples %s" % err
     samples = max(1, min(samples, MAX_SAMPLES))
@@ -240,6 +240,8 @@ def handler(job):
             device_reason = _extract(_DEVICE_REASON_RE, stdout, "no device_reason reported by scene_builder.py")
             blender_version = _extract(_VERSION_RE, stdout, "unknown")
 
+            if guide_scene.is_guide(clean["scene"]):
+                guide_scene.normalise_frames(out_dir)
             frame_files = sorted(glob.glob(os.path.join(out_dir, "*.png")))
             if not frame_files:
                 return {"ok": False, "error": "no frames rendered"}
