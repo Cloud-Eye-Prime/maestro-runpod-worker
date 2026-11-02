@@ -14,7 +14,6 @@ import os
 import sys
 
 import bpy
-import mathutils
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import guide_scene  # noqa: E402
@@ -191,6 +190,7 @@ def diag_main(out_path):
 
 def run_guide(job, scene_dict, out_dir):
     """scene_v2: build the guide, wire the passes, render every frame."""
+    import mathutils  # only importable inside Blender
     guide_scene.build_guide(bpy, mathutils, scene_dict)
     _configure_render(job)
     plate = scene_dict.get("backplate_b64")
