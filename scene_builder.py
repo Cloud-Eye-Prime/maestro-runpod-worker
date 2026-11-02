@@ -14,6 +14,10 @@ import os
 import sys
 
 import bpy
+import mathutils
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import guide_scene  # noqa: E402
 
 REGISTER_CAMERA = {
     "qian": {"height": 3.0, "lens": 28.0},
@@ -185,6 +189,20 @@ def diag_main(out_path):
         json.dump(result, f)
 
 
+def run_guide(job, scene_dict, out_dir):
+    """scene_v2: build the guide, wire the passes, render every frame."""
+    guide_scene.build_guide(bpy, mathutils, scene_dict)
+    _configure_render(job)
+    plate = scene_dict.get("backplate_b64")
+    plate_path = guide_scene.decode_backplate(plate) if plate else None
+    passes = scene_dict.get("passes") or list(guide_scene.KNOWN_PASSES)
+    guide_scene.build_compositor(bpy, out_dir, passes, plate_path)
+    for frame in range(1, job["frames"] + 1):
+        bpy.context.scene.frame_set(frame)
+        bpy.context.scene.render.filepath = os.path.join(out_dir, "frame_%04d.png" % frame)
+        bpy.ops.render.render(write_still=True)
+
+
 def main():
     argv = sys.argv
     sep = argv.index("--")
@@ -204,6 +222,9 @@ def main():
     scene_dict = job.get("scene") or {}
 
     _clear_scene()
+    if guide_scene.is_guide(scene_dict):
+        run_guide(job, scene_dict, out_dir)
+        return
     _build_objects(scene_dict)
     _configure_render(job)
 

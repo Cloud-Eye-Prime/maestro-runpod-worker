@@ -39,6 +39,8 @@ import time
 import requests
 import runpod
 
+import guide_scene
+
 SCENE_BUILDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_builder.py")
 BLENDER_BIN = "blender"
 
@@ -81,15 +83,25 @@ def validate_input(data):
         return None, "input must be an object"
 
     scene = data.get("scene")
+    if scene is None and guide_scene.is_guide(data):
+        scene = data   # the guide job may arrive as the input itself
     if scene is None:
         scene = {"test": True}
     if not isinstance(scene, dict):
         return None, "scene must be an object"
+    guide = guide_scene.is_guide(scene)
+    if guide:
+        guide_err = guide_scene.validate_guide(scene)
+        if guide_err:
+            return None, guide_err
 
     frames, err = _as_int(data.get("frames"), DEFAULT_FRAMES)
     if err:
         return None, "frames %s" % err
-    frames = max(1, min(frames, MAX_FRAMES))
+    if guide:
+        frames = guide_scene.guide_frames(scene, frames)
+    else:
+        frames = max(1, min(frames, MAX_FRAMES))
 
     width, err = _as_int(data.get("width"), DEFAULT_WIDTH)
     if err:
@@ -184,6 +196,7 @@ def run_diag():
 
     return {
         "ok": True,
+        "capabilities": [guide_scene.CAPABILITY],
         "diag": {
             "nvidia_smi": nvidia_smi,
             "cuda_libs": cuda_libs,
