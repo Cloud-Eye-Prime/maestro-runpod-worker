@@ -136,3 +136,94 @@ def test_validate_guide_is_pure_and_does_not_mutate():
     before = copy.deepcopy(s)
     assert guide_scene.validate_guide(s) is None
     assert s == before
+
+
+# ---- video packaging (scene_v2: one mp4 per pass)
+import base64  # noqa: E402
+import os  # noqa: E402
+import zipfile  # noqa: E402
+
+
+def _fake_ffmpeg(size_by_name):
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        out = cmd[-1]
+        name = os.path.splitext(os.path.basename(out))[0]
+        with open(out, "wb") as f:
+            f.write(b"x" * size_by_name.get(name, 1000))
+        return types.SimpleNamespace(returncode=0, stderr="")
+    run.calls = calls
+    return run
+
+
+def test_ffmpeg_cmd_is_h264_yuv420p_crf12_at_the_scene_fps():
+    cmd = guide_scene.ffmpeg_cmd("/o", "mask", 16, "/v/mask.mp4")
+    assert cmd[cmd.index("-crf") + 1] == "12"
+    assert cmd[cmd.index("-framerate") + 1] == "16"
+    assert "libx264" in cmd and "format=yuv420p" in cmd[cmd.index("-vf") + 1]
+    assert cmd[cmd.index("-i") + 1].replace("\\", "/") == "/o/mask_%04d.png"
+    assert guide_scene.ffmpeg_cmd("/o", "animatic", 16, "/v/a.mp4")[
+        guide_scene.ffmpeg_cmd("/o", "animatic", 16, "/v/a.mp4").index("-i") + 1
+    ].replace("\\", "/") == "/o/frame_%04d.png"
+
+
+def test_encode_one_video_per_pass_and_small_total_stays_mp4(tmp_path):
+    run = _fake_ffmpeg({})
+    made = guide_scene.encode_passes(str(tmp_path), str(tmp_path / "v"),
+                                     ["animatic", "depth", "canny", "mask"], 16, run=run)
+    assert [n for n, _ in made] == ["animatic", "depth", "canny", "mask"]
+    paths, how = guide_scene.package_videos(made, str(tmp_path / "g.zip"))
+    assert how == "mp4" and len(paths) == 4
+
+
+def test_encode_failure_raises_with_stderr(tmp_path):
+    def bad(cmd, **kw):
+        return types.SimpleNamespace(returncode=1, stderr="no such file")
+    try:
+        guide_scene.encode_passes(str(tmp_path), str(tmp_path / "v"), ["depth"], 16, run=bad)
+    except RuntimeError as e:
+        assert "depth" in str(e) and "no such file" in str(e)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_over_cap_goes_to_one_zip_and_zip_over_cap_is_refused(tmp_path):
+    made = guide_scene.encode_passes(str(tmp_path), str(tmp_path / "v"), ["depth", "mask"], 16,
+                                     run=_fake_ffmpeg({"depth": 4000, "mask": 4000}))
+    paths, how = guide_scene.package_videos(made, str(tmp_path / "g.zip"), cap=5000)
+    assert how == "zip" and len(paths) == 1
+    assert sorted(zipfile.ZipFile(paths[0]).namelist()) == ["depth.mp4", "mask.mp4"]
+    import random
+    rnd = random.Random(1)
+    noisy = guide_scene.encode_passes(str(tmp_path), str(tmp_path / "w"), ["depth"], 16, run=_fake_ffmpeg({}))
+    with open(noisy[0][1], "wb") as f:
+        f.write(bytes(rnd.getrandbits(8) for _ in range(6000)))
+    try:
+        guide_scene.package_videos(noisy, str(tmp_path / "h.zip"), cap=5000)
+    except RuntimeError as e:
+        assert "over the 5000 cap" in str(e)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_handler_returns_four_mp4s_base64_for_a_guide_job(monkeypatch):
+    def fake_blender(job_args_path, out_dir):
+        for i in range(1, 4):
+            open(os.path.join(out_dir, "frame_%04d.png" % i), "wb").write(b"png")
+        return types.SimpleNamespace(returncode=0, stdout="[maestro] device=OPTIX\n", stderr="")
+    monkeypatch.setattr(handler, "_run_blender", fake_blender)
+    monkeypatch.setattr(handler.subprocess, "run", _fake_ffmpeg({"mask": 1234}))
+    out = handler.handler({"input": {"scene": _guide(frames=3), "return": "base64"}})
+    assert out["ok"] is True and out["frames_rendered"] == 4
+    names = [a["name"] for a in out["artifacts"]]
+    assert names == ["animatic.mp4", "depth.mp4", "canny.mp4", "mask.mp4"]
+    mask = next(a for a in out["artifacts"] if a["name"] == "mask.mp4")
+    assert len(base64.b64decode(mask["b64"])) == 1234
+
+
+def test_guide_engine_defaults_to_cycles_and_old_default_unchanged():
+    assert handler.validate_input({"scene": _guide()})[0]["engine"] == "CYCLES"
+    assert handler.validate_input({})[0]["engine"] == "CYCLES"
+    assert handler.validate_input({"scene": _guide(), "engine": "EEVEE"})[0]["engine"] == "EEVEE"

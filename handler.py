@@ -121,7 +121,7 @@ def validate_input(data):
         return None, "samples %s" % err
     samples = max(1, min(samples, MAX_SAMPLES))
 
-    engine = data.get("engine") or "CYCLES"
+    engine = data.get("engine") or "CYCLES"   # the guide schema defaults to CYCLES too
     if engine not in VALID_ENGINES:
         return None, "engine must be one of %s" % (VALID_ENGINES,)
 
@@ -243,6 +243,17 @@ def handler(job):
             frame_files = sorted(glob.glob(os.path.join(out_dir, "*.png")))
             if not frame_files:
                 return {"ok": False, "error": "no frames rendered"}
+            if guide_scene.is_guide(clean["scene"]):
+                scene = clean["scene"]
+                passes = scene.get("passes") or list(guide_scene.KNOWN_PASSES)
+                try:
+                    made = guide_scene.encode_passes(
+                        out_dir, os.path.join(work_dir, "videos"), passes,
+                        scene.get("fps") or 16, run=subprocess.run)
+                    frame_files, _how = guide_scene.package_videos(
+                        made, os.path.join(work_dir, "guide.zip"))
+                except (RuntimeError, subprocess.TimeoutExpired) as e:
+                    return {"ok": False, "error": str(e)}
 
             artifacts = []
             for path in frame_files:

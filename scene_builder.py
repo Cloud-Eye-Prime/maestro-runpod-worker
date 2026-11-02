@@ -193,6 +193,9 @@ def run_guide(job, scene_dict, out_dir):
     import mathutils  # only importable inside Blender
     guide_scene.build_guide(bpy, mathutils, scene_dict)
     _configure_render(job)
+    if job["engine"] == "CYCLES":
+        # sampling noise would cost bitrate at crf 12 and blow the output budget
+        bpy.context.scene.cycles.use_denoising = True
     plate = scene_dict.get("backplate_b64")
     plate_path = guide_scene.decode_backplate(plate) if plate else None
     passes = scene_dict.get("passes") or list(guide_scene.KNOWN_PASSES)

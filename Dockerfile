@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         wget \
         ca-certificates \
+        ffmpeg \
         xz-utils \
         libx11-6 \
         libxext6 \

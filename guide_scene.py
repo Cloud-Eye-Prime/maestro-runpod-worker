@@ -1,5 +1,5 @@
 """blender_guide_v1 scene path (scene_v2): grey-box guide animatic plus
-depth, edge and mask passes.
+depth, edge and mask passes, returned as ONE H.264 mp4 per pass.
 
 Pure helpers (is_guide, guide_frames, validate_guide) need no Blender and are
 shared with handler.py. build_guide / render_guide run INSIDE Blender and are
@@ -7,7 +7,8 @@ called from scene_builder.main when the job carries schema blender_guide_v1.
 The job is the output of tools_local/blender_guide_20261101.build_job in the
 lab repo: stage cuboids, cast parts, per-frame tracks, a locked camera.
 
-Outputs in out_dir, one file per frame (frame numbers start at 1):
+Blender writes one PNG per frame per pass into out_dir (frames start at 1);
+handler.py then encodes each pass to an mp4 (crf 12, yuv420p) and returns those:
   frame_NNNN.png   the animatic (composite)
   depth_NNNN.png   Z normalised near=white, far=black over the camera clip
   canny_NNNN.png   soft edge pass: Sobel of depth and mask, then a blur
@@ -16,7 +17,9 @@ Outputs in out_dir, one file per frame (frame numbers start at 1):
 import base64
 import math
 import os
+import subprocess
 import tempfile
+import zipfile
 
 GUIDE_SCHEMA = "blender_guide_v1"
 CAPABILITY = "scene_v2"
@@ -25,6 +28,12 @@ KNOWN_PASSES = ("animatic", "depth", "canny", "mask")
 MASK_INDEX = 1
 DEPTH_NEAR_M = 0.5
 DEPTH_FAR_M = 12.0
+DEFAULT_ENGINE = "CYCLES"
+VIDEO_CRF = 12
+# RunPod's /run output limit is 10 MB; base64 adds a third, so keep the raw
+# bytes at 6 MB (8 MB encoded) and leave room for the JSON around them.
+MAX_RAW_BYTES = 6 * 1000 * 1000
+FFMPEG_BIN = "ffmpeg"
 
 
 def is_guide(scene):
@@ -213,3 +222,55 @@ def decode_backplate(b64):
     with os.fdopen(handle, "wb") as f:
         f.write(base64.b64decode(b64))
     return path
+
+
+def pass_prefix(name):
+    """File prefix Blender writes for a pass: the animatic is frame_NNNN.png."""
+    return "frame" if name == "animatic" else name
+
+
+def ffmpeg_cmd(out_dir, name, fps, out_path, crf=VIDEO_CRF):
+    """ffmpeg argv: PNG sequence for one pass -> H.264 yuv420p mp4.
+
+    Depth, canny and mask are 8-bit grey PNGs; format=yuv420p carries them as
+    luma. Width and height are forced even, which yuv420p needs.
+    """
+    pattern = os.path.join(out_dir, pass_prefix(name) + "_%04d.png")
+    return [FFMPEG_BIN, "-y", "-loglevel", "error", "-framerate", str(int(fps)),
+            "-start_number", "1", "-i", pattern,
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+            "-c:v", "libx264", "-preset", "medium", "-crf", str(int(crf)),
+            "-movflags", "+faststart", out_path]
+
+
+def encode_passes(out_dir, video_dir, passes, fps, run=subprocess.run, crf=VIDEO_CRF):
+    """Encode one mp4 per pass; returns [(name, path)]. Raises RuntimeError on failure."""
+    os.makedirs(video_dir, exist_ok=True)
+    made = []
+    for name in passes:
+        out_path = os.path.join(video_dir, name + ".mp4")
+        proc = run(ffmpeg_cmd(out_dir, name, fps, out_path, crf),
+                   capture_output=True, text=True, timeout=600)
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            raise RuntimeError("ffmpeg failed for %s: %s" % (name, (proc.stderr or "")[-500:]))
+        made.append((name, out_path))
+    return made
+
+
+def package_videos(made, zip_path, cap=MAX_RAW_BYTES):
+    """Pick what to return: the mp4s, or ONE zip of them when they are over cap.
+
+    Returns (paths, how). A zip of mp4s hardly shrinks them, so a zip over cap
+    is refused (RuntimeError naming the sizes) rather than sent past the limit.
+    """
+    total = sum(os.path.getsize(p) for _, p in made)
+    if total <= cap:
+        return [p for _, p in made], "mp4"
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, path in made:
+            z.write(path, os.path.basename(path))
+    zipped = os.path.getsize(zip_path)
+    if zipped > cap:
+        raise RuntimeError("guide videos are %d bytes (%d zipped), over the %d cap; "
+                           "lower width/height or frames" % (total, zipped, cap))
+    return [zip_path], "zip"
