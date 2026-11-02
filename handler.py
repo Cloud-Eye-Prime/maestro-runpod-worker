@@ -231,7 +231,9 @@ def handler(job):
 
             if result.returncode != 0:
                 tail = (result.stderr or "")[-2000:]
-                return {"ok": False, "error": "blender exited %d: %s" % (result.returncode, tail)}
+                seen = result.stdout or ""
+                where = "device=%s" % _extract(_DEVICE_RE, seen, "not reported")
+                return {"ok": False, "error": "blender exited %d (%s): %s" % (result.returncode, where, tail)}
 
             stdout = result.stdout or ""
             device = _extract(_DEVICE_RE, stdout, "CPU")

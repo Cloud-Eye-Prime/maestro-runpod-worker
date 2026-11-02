@@ -166,6 +166,7 @@ def _configure_render(job):
     print("[maestro] device=%s" % device)
     print("[maestro] device_reason=%s" % device_reason)
     print("[maestro] blender_version=%s" % bpy.app.version_string)
+    return device, device_reason
 
 
 def diag_main(out_path):
@@ -193,7 +194,7 @@ def run_guide(job, scene_dict, out_dir):
     """scene_v2: build the guide, wire the passes, render every frame."""
     import mathutils  # only importable inside Blender
     guide_scene.build_guide(bpy, mathutils, scene_dict)
-    _configure_render(job)
+    device, device_reason = _configure_render(job)
     if job["engine"] == "CYCLES":
         # sampling noise would cost bitrate at crf 12 and blow the output budget
         bpy.context.scene.cycles.use_denoising = True
@@ -204,21 +205,18 @@ def run_guide(job, scene_dict, out_dir):
     # _configure_render turned the extension off for the old path's explicit names; the
     # guide wants ONE ".png" from Blender for both write_still and the File Output node
     bpy.context.scene.render.use_file_extension = True
-    started = None
+    seconds = []
     for frame in range(1, job["frames"] + 1):
         bpy.context.scene.frame_set(frame)
         bpy.context.scene.render.filepath = os.path.join(out_dir, "frame_%04d" % frame)
+        t0 = time.time()
         bpy.ops.render.render(write_still=True)
-        if frame == 1:
-            started = time.time()   # frame 1 carries kernel and OptiX warm-up; time the rest
-        elif frame == guide_scene.BUDGET_PROBE_FRAMES:
-            done = frame - 1
-            elapsed = time.time() - started
-            if guide_scene.over_budget(elapsed, done, job["frames"] - 1):
-                raise SystemExit("render projected at %.0f s for %d frames, over the %.0f s budget; "
-                                 "lower width/height or samples" % (
-                                     guide_scene.projected_seconds(elapsed, done, job["frames"] - 1),
-                                     job["frames"], guide_scene.RENDER_BUDGET_S))
+        seconds.append(time.time() - t0)
+        print("[maestro] frame %d seconds=%.1f" % (frame, seconds[-1]))
+        if frame == guide_scene.BUDGET_PROBE_FRAMES and guide_scene.projected_total(
+                seconds, job["frames"]) > guide_scene.RENDER_BUDGET_S:
+            raise SystemExit(guide_scene.budget_message(
+                device, device_reason, seconds, job["frames"]))
 
 
 def main():

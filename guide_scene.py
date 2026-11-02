@@ -43,7 +43,7 @@ GUIDE_DEFAULT_WIDTH = 960
 GUIDE_DEFAULT_HEIGHT = 540
 GUIDE_DEFAULT_SAMPLES = 8
 RENDER_BUDGET_S = 480.0
-BUDGET_PROBE_FRAMES = 3
+BUDGET_PROBE_FRAMES = 4   # frames 2-4 are timed; frame 1 is reported as warm-up
 
 
 def is_guide(scene):
@@ -357,3 +357,24 @@ def frames_listing(out_dir, listdir=os.listdir, limit=20):
     shown = ", ".join(names[:limit])
     more = " (+%d more)" % (len(names) - limit) if len(names) > limit else ""
     return "frames dir holds %d files: %s%s" % (len(names), shown or "none", more)
+
+
+def projected_total(seconds, total_frames):
+    """Whole-render seconds from the per-frame list so far: frame 1 as it was (warm-up
+    included, because the job timeout counts it) plus the mean of the rest times the rest."""
+    if len(seconds) < 2:
+        return 0.0
+    rest = seconds[1:]
+    return seconds[0] + sum(rest) / float(len(rest)) * (total_frames - 1)
+
+
+def budget_message(device, device_reason, seconds, total_frames, budget=RENDER_BUDGET_S):
+    """The guard's refusal, with what is needed to tell a slow machine from a slow scene:
+    the device Cycles chose, why, frame 1 (warm-up) and each later frame in seconds."""
+    rest = seconds[1:]
+    mean = sum(rest) / float(len(rest)) if rest else 0.0
+    return ("render projected at %.0f s for %d frames, over the %.0f s budget; "
+            "device=%s; device_reason=%s; warmup_frame1_s=%.1f; later_frames_s=[%s]; mean_later_s=%.1f; "
+            "lower width/height or samples" % (
+                projected_total(seconds, total_frames), total_frames, budget, device, device_reason,
+                seconds[0] if seconds else 0.0, ", ".join("%.1f" % s for s in rest), mean))
