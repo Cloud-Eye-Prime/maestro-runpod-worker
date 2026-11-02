@@ -227,3 +227,71 @@ def test_guide_engine_defaults_to_cycles_and_old_default_unchanged():
     assert handler.validate_input({"scene": _guide()})[0]["engine"] == "CYCLES"
     assert handler.validate_input({})[0]["engine"] == "CYCLES"
     assert handler.validate_input({"scene": _guide(), "engine": "EEVEE"})[0]["engine"] == "EEVEE"
+
+
+# ---- 11-01 live fix: file extensions, error listing, render budget
+def test_normalise_renames_whatever_extension_blender_gave():
+    names = ["depth_0001", "canny_0002.png", "frame_0003.png.png", "mask_0004.png", "other.txt"]
+    renames = []
+    n = guide_scene.normalise_frames("/o", listdir=lambda d: names,
+                                     rename=lambda a, b: renames.append((os.path.basename(a), os.path.basename(b))))
+    assert n == 2
+    assert ("depth_0001", "depth_0001.png") in renames
+    assert ("frame_0003.png.png", "frame_0003.png") in renames
+    assert all(a != "mask_0004.png" and a != "canny_0002.png" and a != "other.txt" for a, _ in renames)
+
+
+def test_frames_listing_names_only_first_20():
+    names = ["f%02d" % i for i in range(30)]
+    msg = guide_scene.frames_listing("/o", listdir=lambda d: names)
+    assert "30 files" in msg and "f19" in msg and "f20" not in msg and "+10 more" in msg
+    assert "unreadable" in guide_scene.frames_listing("/o", listdir=lambda d: (_ for _ in ()).throw(OSError()))
+
+
+def test_ffmpeg_failure_lists_the_frames_dir(tmp_path):
+    (tmp_path / "frame_0001.png").write_bytes(b"x")
+    def bad(cmd, **kw):
+        return types.SimpleNamespace(returncode=1, stderr="no such file")
+    try:
+        guide_scene.encode_passes(str(tmp_path), str(tmp_path / "v"), ["depth"], 16, run=bad)
+    except RuntimeError as e:
+        assert "frame_0001.png" in str(e) and "files:" in str(e)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_render_budget_projection():
+    assert guide_scene.projected_seconds(15.0, 3, 81) == 405.0
+    assert guide_scene.over_budget(15.0, 3, 81) is False
+    assert guide_scene.over_budget(20.0, 3, 81) is True   # 540 s projected
+    assert guide_scene.projected_seconds(1.0, 0, 81) == 0.0
+
+
+def test_guide_defaults_to_960x540_8_samples_old_path_keeps_1280x720_64():
+    clean, _ = handler.validate_input({"scene": _guide()})
+    assert (clean["width"], clean["height"], clean["samples"]) == (960, 540, 8)
+    clean, _ = handler.validate_input({"scene": _guide(), "width": 1280, "height": 720, "samples": 16})
+    assert (clean["width"], clean["height"], clean["samples"]) == (1280, 720, 16)
+    clean, _ = handler.validate_input({})
+    assert (clean["width"], clean["height"], clean["samples"]) == (1280, 720, 64)
+
+
+def test_handler_normalises_extensionless_frames_before_encoding(monkeypatch):
+    def fake_blender(job_args_path, out_dir):
+        for i in range(1, 3):
+            open(os.path.join(out_dir, "frame_%04d" % i), "wb").write(b"png")
+            open(os.path.join(out_dir, "depth_%04d" % i), "wb").write(b"png")
+        return types.SimpleNamespace(returncode=0, stdout="[maestro] device=OPTIX\n", stderr="")
+    monkeypatch.setattr(handler, "_run_blender", fake_blender)
+    monkeypatch.setattr(handler.subprocess, "run", _fake_ffmpeg({}))
+    s = _guide(frames=2)
+    s["passes"] = ["animatic", "depth"]
+    out = handler.handler({"input": {"scene": s}})
+    assert out["ok"] is True and [a["name"] for a in out["artifacts"]] == ["animatic.mp4", "depth.mp4"]
+
+
+def test_scene_builder_run_guide_sets_extension_and_names_without_png():
+    import inspect
+    src = inspect.getsource(scene_builder.run_guide)
+    assert "use_file_extension = True" in src
+    assert '"frame_%04d" % frame' in src and "frame_%04d.png" not in src and "started = None" in src

@@ -12,6 +12,7 @@ Then sets engine/samples/resolution/frame range and renders PNGs to out_dir.
 import json
 import os
 import sys
+import time
 
 import bpy
 
@@ -200,10 +201,24 @@ def run_guide(job, scene_dict, out_dir):
     plate_path = guide_scene.decode_backplate(plate) if plate else None
     passes = scene_dict.get("passes") or list(guide_scene.KNOWN_PASSES)
     guide_scene.build_compositor(bpy, out_dir, passes, plate_path)
+    # _configure_render turned the extension off for the old path's explicit names; the
+    # guide wants ONE ".png" from Blender for both write_still and the File Output node
+    bpy.context.scene.render.use_file_extension = True
+    started = None
     for frame in range(1, job["frames"] + 1):
         bpy.context.scene.frame_set(frame)
-        bpy.context.scene.render.filepath = os.path.join(out_dir, "frame_%04d.png" % frame)
+        bpy.context.scene.render.filepath = os.path.join(out_dir, "frame_%04d" % frame)
         bpy.ops.render.render(write_still=True)
+        if frame == 1:
+            started = time.time()   # frame 1 carries kernel and OptiX warm-up; time the rest
+        elif frame == guide_scene.BUDGET_PROBE_FRAMES:
+            done = frame - 1
+            elapsed = time.time() - started
+            if guide_scene.over_budget(elapsed, done, job["frames"] - 1):
+                raise SystemExit("render projected at %.0f s for %d frames, over the %.0f s budget; "
+                                 "lower width/height or samples" % (
+                                     guide_scene.projected_seconds(elapsed, done, job["frames"] - 1),
+                                     job["frames"], guide_scene.RENDER_BUDGET_S))
 
 
 def main():
