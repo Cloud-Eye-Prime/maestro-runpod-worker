@@ -294,4 +294,4 @@ def test_scene_builder_run_guide_sets_extension_and_names_without_png():
     import inspect
     src = inspect.getsource(scene_builder.run_guide)
     assert "use_file_extension = True" in src
-    assert '"frame_%04d" % frame' in src and "frame_%04d.png" not in src
+    assert '"frame_%04d" % frame' in src and "frame_%04d.png" not in src and "started = None" in src
