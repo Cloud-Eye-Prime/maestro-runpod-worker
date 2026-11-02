@@ -294,7 +294,7 @@ def test_scene_builder_run_guide_sets_extension_and_names_without_png():
     import inspect
     src = inspect.getsource(scene_builder.run_guide)
     assert "use_file_extension = True" in src
-    assert '"frame_%04d" % frame' in src and "frame_%04d.png" not in src and "started = None" in src
+    assert '"frame_%04d" % frame' in src and "frame_%04d.png" not in src and "seconds = []" in src and "budget_message" in src
 
 
 # ---- 11-02: plate scale, holdout stage, data-driven part rotation, root scale
@@ -397,3 +397,43 @@ def test_validate_guide_still_accepts_scale_rot_and_role_keys():
     s["stage"][0]["role"] = "holdout"
     s["tracks"]["dragon_b"][0]["scale"] = 1.5
     assert guide_scene.validate_guide(s) is None
+
+
+# ---- 11-02 diagnostics: device and per-frame seconds on a guard or blender error
+def test_projected_total_counts_warmup_and_scales_the_rest():
+    assert guide_scene.projected_total([100.0, 2.0, 2.0, 2.0], 81) == 100.0 + 2.0 * 80
+    assert guide_scene.projected_total([5.0], 81) == 0.0          # nothing to scale from yet
+
+
+def test_budget_message_carries_device_warmup_and_frame_seconds():
+    msg = guide_scene.budget_message("CPU", "no GPU device available for OPTIX or CUDA (OPTIX: 0 devices)",
+                                     [400.0, 19.7, 19.8, 19.6], 81)
+    assert "device=CPU" in msg and "no GPU device available" in msg
+    assert "warmup_frame1_s=400.0" in msg and "later_frames_s=[19.7, 19.8, 19.6]" in msg
+    assert "mean_later_s=19.7" in msg and "over the 480 s budget" in msg and "1976 s" in msg
+
+
+def test_probe_is_frames_2_to_4():
+    assert guide_scene.BUDGET_PROBE_FRAMES == 4
+
+
+def test_handler_blender_error_names_the_device(monkeypatch):
+    def fake_blender(job_args_path, out_dir):
+        return types.SimpleNamespace(returncode=1, stdout="[maestro] device=CPU\n", stderr="render projected at 1573 s")
+    monkeypatch.setattr(handler, "_run_blender", fake_blender)
+    out = handler.handler({"input": {"scene": _guide(frames=3)}})
+    assert out["ok"] is False and "device=CPU" in out["error"] and "render projected" in out["error"]
+
+
+def test_handler_blender_error_without_a_device_line_says_so(monkeypatch):
+    monkeypatch.setattr(handler, "_run_blender", lambda a, b: types.SimpleNamespace(
+        returncode=2, stdout="", stderr="boom"))
+    out = handler.handler({"input": {"scene": {"test": True}}})
+    assert "device=not reported" in out["error"] and "boom" in out["error"]
+
+
+def test_run_guide_reports_device_and_times_every_frame():
+    import inspect
+    src = inspect.getsource(scene_builder.run_guide)
+    assert "device, device_reason = _configure_render(job)" in src
+    assert "budget_message(" in src and "[maestro] frame %d seconds" in src
