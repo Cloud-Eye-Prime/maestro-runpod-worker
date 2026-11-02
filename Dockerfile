@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         wget \
         ca-certificates \
+        ffmpeg \
         xz-utils \
         libx11-6 \
         libxext6 \
@@ -36,6 +37,6 @@ RUN wget -q -O /tmp/blender.tar.xz \
 RUN pip3 install --no-cache-dir runpod requests
 
 WORKDIR /app
-COPY handler.py scene_builder.py /app/
+COPY handler.py scene_builder.py guide_scene.py /app/
 
 CMD ["python3", "-u", "handler.py"]

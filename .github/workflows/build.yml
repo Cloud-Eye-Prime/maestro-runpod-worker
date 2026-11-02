@@ -2,7 +2,7 @@ name: build
 
 on:
   push:
-    branches: [main, worker-gpu]
+    branches: [main, worker-gpu, "feat/**"]
 
 env:
   REGISTRY: ghcr.io
@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install pytest requests runpod
-      - run: pytest test_handler_offline.py test_scene_builder_offline.py -v
+      - run: pytest test_handler_offline.py test_scene_builder_offline.py test_guide_scene_offline.py -v
 
   build:
     needs: test
@@ -41,7 +41,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
             type=sha,format=short
 
       - name: Build and push
