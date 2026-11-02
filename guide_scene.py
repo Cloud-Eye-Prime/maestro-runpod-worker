@@ -27,6 +27,7 @@ CAPABILITY = "scene_v2"
 GUIDE_MAX_FRAMES = 81
 KNOWN_PASSES = ("animatic", "depth", "canny", "mask")
 MASK_INDEX = 1
+STAGE_INDEX = 2   # holdout stage proxies: in depth, cut out of the animatic, not in the mask
 DEPTH_NEAR_M = 0.5
 DEPTH_FAR_M = 12.0
 DEFAULT_ENGINE = "CYCLES"
@@ -119,7 +120,11 @@ def build_guide(bpy, mathutils, scene_dict):
     bpy.context.object.data.energy = 3.0
 
     for item in scene_dict["stage"]:
-        _prim(bpy, "cube", item["size"], item["center"]).name = item["name"]
+        if item.get("role", "holdout") == "skip":
+            continue
+        box = _prim(bpy, "cube", item["size"], item["center"])
+        box.name = item["name"]
+        box.pass_index = STAGE_INDEX
 
     for actor in scene_dict["cast"]:
         name = actor["name"]
@@ -139,7 +144,11 @@ def build_guide(bpy, mathutils, scene_dict):
                     loc[2] = part["loc"][2] - k * size[2]
                 obj = _prim(bpy, part["prim"], size, loc)
                 obj.name = "%s.%s.%d" % (name, part["id"], k)
-                if part.get("tilt_deg"):
+                if part.get("rot_deg"):
+                    # data decides how a part faces: a torus' ring axis is its local Z, so
+                    # rot_deg [90, 0, 0] turns the ring to face the head's forward (-Y)
+                    obj.rotation_euler = tuple(math.radians(a) for a in part["rot_deg"])
+                elif part.get("tilt_deg"):
                     obj.rotation_euler = (math.radians(part["tilt_deg"]), 0, 0)
                 if follows:
                     obj.parent = head
@@ -151,9 +160,11 @@ def build_guide(bpy, mathutils, scene_dict):
         for row in scene_dict["tracks"][name]:
             f = row["frame"] + 1
             root.location = tuple(row["loc"])
+            root.scale = (row.get("scale", 1.0),) * 3
             root.rotation_euler = (0, 0, math.radians(row["yaw_deg"]))
             head.rotation_euler = (0, 0, math.radians(row["head_yaw_deg"]))
             root.keyframe_insert("location", frame=f)
+            root.keyframe_insert("scale", frame=f)
             root.keyframe_insert("rotation_euler", frame=f)
             head.keyframe_insert("rotation_euler", frame=f)
 
@@ -176,9 +187,26 @@ def build_compositor(bpy, out_dir, passes, backplate_path=None):
         sc.render.film_transparent = True
         img = new("CompositorNodeImage")
         img.image = bpy.data.images.load(backplate_path)
+        # the plate keeps its own pixel size in the compositor: scale it to the render
+        # size or a 960x540 render shows only the top-left crop of a 1280x720 plate
+        fit = new("CompositorNodeScale")
+        fit.space = "RENDER_SIZE"
+        fit.frame_method = "STRETCH"
+        tree.links.new(img.outputs["Image"], fit.inputs["Image"])
+        # stage proxies stay in depth but leave the animatic: cut where the front-most
+        # surface is a stage box (index 2), so the plate shows through
+        stage_id = new("CompositorNodeIDMask")
+        stage_id.index = STAGE_INDEX
+        tree.links.new(rl.outputs["IndexOB"], stage_id.inputs["ID value"])
+        keep = new("CompositorNodeInvert")
+        tree.links.new(stage_id.outputs["Alpha"], keep.inputs["Color"])
+        cut = new("CompositorNodeSetAlpha")
+        cut.mode = "APPLY"
+        tree.links.new(rl.outputs["Image"], cut.inputs["Image"])
+        tree.links.new(keep.outputs["Color"], cut.inputs["Alpha"])
         over = new("CompositorNodeAlphaOver")
-        tree.links.new(img.outputs["Image"], over.inputs[1])
-        tree.links.new(rl.outputs["Image"], over.inputs[2])
+        tree.links.new(fit.outputs["Image"], over.inputs[1])
+        tree.links.new(cut.outputs["Image"], over.inputs[2])
         tree.links.new(over.outputs["Image"], comp.inputs["Image"])
     else:
         tree.links.new(rl.outputs["Image"], comp.inputs["Image"])

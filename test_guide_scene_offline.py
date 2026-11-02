@@ -295,3 +295,105 @@ def test_scene_builder_run_guide_sets_extension_and_names_without_png():
     src = inspect.getsource(scene_builder.run_guide)
     assert "use_file_extension = True" in src
     assert '"frame_%04d" % frame' in src and "frame_%04d.png" not in src and "started = None" in src
+
+
+# ---- 11-02: plate scale, holdout stage, data-driven part rotation, root scale
+class _Obj:
+    def __init__(self, name=""):
+        self.name, self.parent, self.location = name, None, (0, 0, 0)
+        self.rotation_euler, self.scale, self.pass_index = (0, 0, 0), (1, 1, 1), 0
+        self.data = types.SimpleNamespace(energy=0, lens=0, sensor_width=0, clip_start=0, clip_end=0)
+        self.keys = []
+
+    def keyframe_insert(self, prop, frame):
+        self.keys.append((prop, frame))
+
+
+class _FakeBpy:
+    def __init__(self):
+        self.objects = []
+        self.empties = []
+        self.kinds = {}
+        mk = lambda kind: (lambda **kw: self._add(kind, kw))  # noqa: E731
+        self.ops = types.SimpleNamespace(
+            mesh=types.SimpleNamespace(
+                primitive_uv_sphere_add=mk("sphere"), primitive_torus_add=mk("torus"),
+                primitive_cylinder_add=mk("cylinder"), primitive_cube_add=mk("cube")),
+            object=types.SimpleNamespace(camera_add=mk("camera"), light_add=mk("light")))
+        scene = types.SimpleNamespace(
+            camera=None, collection=types.SimpleNamespace(objects=types.SimpleNamespace(link=lambda o: None)))
+        self.context = types.SimpleNamespace(scene=scene, object=None)
+        self.data = types.SimpleNamespace(objects=types.SimpleNamespace(new=lambda n, d: self._empty(n)),
+                                          images=types.SimpleNamespace(load=lambda p: "img:" + p))
+
+    def _empty(self, name):
+        o = _Obj(name)
+        self.empties.append(o)
+        return o
+
+    def _add(self, kind, kw):
+        o = _Obj()
+        o.location = kw.get("location", (0, 0, 0))
+        self.kinds[id(o)] = kind
+        self.objects.append(o)
+        self.context.object = o
+
+
+class _FakeVec:
+    def __init__(self, v):
+        pass
+
+    def to_track_quat(self, a, b):
+        return types.SimpleNamespace(to_euler=lambda: (0, 0, 0))
+
+
+def _guide_with(parts, stage):
+    s = _guide(frames=3)
+    s["stage"] = stage
+    s["cast"][0]["parts"] = parts
+    for row in s["tracks"]["dragon_b"]:
+        row["scale"] = 1.5
+    return s
+
+
+def test_build_guide_holdout_stage_skip_rotation_and_root_scale():
+    fake = _FakeBpy()
+    stage = [{"name": "chair", "center": [0, 5, 1], "size": [1, 1, 1], "role": "holdout"},
+             {"name": "table", "center": [0, 4, 1], "size": [1, 1, 1], "role": "skip"}]
+    parts = [{"id": "head", "prim": "sphere", "size": [1, 1, 1], "loc": [0, 0, 2], "follows": "head"},
+             {"id": "ring", "prim": "torus", "size": [.1, .1, .02], "loc": [0, -.1, 2], "rot_deg": [90, 0, 0],
+              "follows": "head"},
+             {"id": "torso", "prim": "capsule", "size": [1, 1, 1], "loc": [0, 0, 1]}]
+    guide_scene.build_guide(fake, types.SimpleNamespace(Vector=_FakeVec), _guide_with(parts, stage))
+    cubes = [o for o in fake.objects if fake.kinds[id(o)] == "cube"]
+    assert [o.name for o in cubes] == ["chair"] and cubes[0].pass_index == guide_scene.STAGE_INDEX
+    ring = next(o for o in fake.objects if o.name.endswith(".ring.0"))
+    assert abs(ring.rotation_euler[0] - 1.5707963) < 1e-6 and ring.pass_index == guide_scene.MASK_INDEX
+    root = next(o for o in fake.empties if o.name == "dragon_b")
+    assert root.scale == (1.5, 1.5, 1.5)
+    assert [k for k in root.keys if k[0] == "scale"] == [("scale", 1), ("scale", 2), ("scale", 3)]
+    assert guide_scene.STAGE_INDEX != guide_scene.MASK_INDEX
+
+
+def test_compositor_with_plate_scales_it_and_cuts_the_stage_from_the_animatic_only():
+    scene = types.SimpleNamespace(
+        use_nodes=False, node_tree=_Tree(), view_layers=[types.SimpleNamespace()],
+        render=types.SimpleNamespace(use_compositing=False, film_transparent=False))
+    bpy = types.SimpleNamespace(context=types.SimpleNamespace(scene=scene),
+                                data=types.SimpleNamespace(images=types.SimpleNamespace(load=lambda p: "img")))
+    guide_scene.build_compositor(bpy, "/o", ["animatic", "depth", "canny", "mask"], backplate_path="/p.png")
+    nodes = scene.node_tree.nodes
+    fit = next(n for n in nodes if n.kind == "CompositorNodeScale")
+    assert fit.space == "RENDER_SIZE" and fit.frame_method == "STRETCH"
+    ids = [n.index for n in nodes if n.kind == "CompositorNodeIDMask"]
+    assert sorted(ids) == [guide_scene.MASK_INDEX, guide_scene.STAGE_INDEX]
+    assert any(n.kind == "CompositorNodeSetAlpha" and n.mode == "APPLY" for n in nodes)
+    out = next(n for n in nodes if n.kind == "CompositorNodeOutputFile")
+    assert list(out.file_slots) == ["depth_", "canny_", "mask_"]
+
+
+def test_validate_guide_still_accepts_scale_rot_and_role_keys():
+    s = _guide()
+    s["stage"][0]["role"] = "holdout"
+    s["tracks"]["dragon_b"][0]["scale"] = 1.5
+    assert guide_scene.validate_guide(s) is None
